@@ -1,0 +1,113 @@
+<Hero>
+
+# Testing a Go API Without Touching a Real Database: My First Run with Keploy
+
+I'll be honest, a week ago I had no idea what Keploy was. I'm a data analyst by day, not a backend engineer, so "automated API testing" wasn't exactly home turf for me. But I picked one of Keploy's Go quickstarts, broke my environment a few times, fixed it, and came out the other side actually getting why this tool exists. This is that walkthrough, written the way I wish someone had written it for me.
+
+<Callout type="info">
+If you've never touched Go, Docker, or WSL before, don't worry. I hadn't really either, going into this. I'll flag every place I got stuck.
+</Callout>
+
+</Hero>
+
+## What I was actually building
+
+Keploy has a bunch of sample apps to test-drive its tooling, split by language. I went with the **Go + Echo + Postgres** sample, a tiny URL shortener. You send it a long URL, it gives you back a short one; you visit the short one, it redirects you to the original. Two endpoints, one database table. Small enough that I could focus on understanding Keploy instead of untangling someone else's complicated app.
+
+## What Keploy is actually doing (the part I didn't get at first)
+
+Normally, testing an API means writing code by hand: call an endpoint, assert the response looks right, and (the annoying part) fake out the database so your tests don't depend on a real one being alive somewhere. That mocking step is genuinely tedious, and it's usually the reason people skip writing tests at all.
+
+Keploy skips the manual part entirely. Instead of you writing test code, you just use your app normally: hit the endpoints like you would with Postman or curl, and Keploy watches quietly in the background. It records two things at once:
+
+1. **The API call itself.** What request came in, what response went out.
+2. **What your app said to the database** while handling that request.
+
+Later, when you tell Keploy to replay those tests, it doesn't need Postgres running at all. It fakes the database side using exactly what it recorded earlier, and just checks: does the app still behave the same way? If yes, nothing broke. If no, something did, and now you know, without needing a live database, without writing a single assertion by hand.
+
+That's the whole pitch, and once I actually saw it work, it clicked in a way that reading about it never did.
+
+<Callout type="tip">
+The best way to understand this tool isn't to read the docs first. It's to record something, break it, and watch the test catch it. Reading came after, for me.
+</Callout>
+
+## Setting up (this is where most of my time actually went)
+
+I'm on Windows, and Keploy's CLI only runs on Linux, so step one was getting **WSL2** working. If you're already comfortable with WSL and Docker, skip ahead to the recording section. If not, here's what actually tripped me up.
+
+### Gotcha #1: Docker said "virtualization not detected"
+
+I installed Docker Desktop, and it refused to start with a *"virtualization support not detected"* error. Turns out enabling WSL2's Windows features isn't enough on its own: your CPU's virtualization setting (Intel VT-x / AMD-V) also has to be turned on in your BIOS, and mine wasn't. Had to reboot into the BIOS menu specifically to flip that switch. Nothing in the Docker install flow tells you this upfront; it just fails with a fairly cryptic message.
+
+Once that was on, `wsl --status` and Docker both started behaving.
+
+### Gotcha #2: `sudo` quietly logs you out of Keploy
+
+`keploy record` needs to run with elevated permissions, so the docs tell you to run it with `sudo`. What they don't mention: `sudo` switches your home directory to root's by default, and Keploy stores your login session under your actual home folder, so running it with plain `sudo` made Keploy think I'd never logged in, every single time. The fix was passing both the path and home directory through explicitly:
+
+```bash
+sudo -E PATH="$PATH" HOME="$HOME" keploy record -c "./echo-psql-url-shortener"
+```
+
+Small thing, cost me way more time than it should have.
+
+### Gotcha #3: Leftover files from a failed attempt broke replay
+
+My first recording attempt failed partway through (an auth timeout), and I didn't fully clean up before trying again. When I ran `keploy test` later, it choked with a cryptic `failed to unmarshal a mock yaml doc of unknown type` error. It turned out to be stale files from the earlier half-finished run sitting in the `keploy/` folder, confusing the replay logic. Deleting that folder and re-recording from scratch fixed it instantly.
+
+<Callout type="warning">
+If your test run throws unexplained parsing errors, check whether you've got leftover files from a previous, incomplete attempt. Wiping the `keploy/` folder and starting the record step fresh is the fastest fix.
+</Callout>
+
+## Actually recording something
+
+With the environment sorted, the real steps were refreshingly simple. With Postgres running in Docker and the app built as a local binary, I started recording:
+
+```bash
+sudo -E PATH="$PATH" HOME="$HOME" keploy record -c "./echo-psql-url-shortener"
+```
+
+Then, in a separate terminal, I just used the app like a normal user would:
+
+```bash
+curl --request POST \
+  --url http://localhost:8082/url \
+  --header 'content-type: application/json' \
+  --data '{"url": "https://google.com"}'
+```
+
+That returned a shortened link. I hit that link too, to trigger the redirect:
+
+```bash
+curl -i http://localhost:8082/Lhr4BWAi
+```
+
+Both calls got captured automatically: no test code written, no assertions, nothing. I stopped the recorder, and Keploy told me it had two test cases ready.
+
+## Replaying without a database
+
+Here's the part that actually sold me on this tool. I ran:
+
+```bash
+keploy test -c './echo-psql-url-shortener' --mappings
+```
+
+and watched both tests pass, with Postgres nowhere in the loop. Keploy faked every database response using what it had recorded earlier, and my app couldn't tell the difference:
+
+```
+Total tests: 2
+Total test passed: 2
+Total test failed: 0
+```
+
+That's the whole point, and it's a genuinely different way of thinking about tests. I didn't decide what to test. I didn't write mocks. I just used the thing once, and got a working regression suite out of it for free.
+
+## Why this actually matters for a Go developer
+
+If you've ever skipped writing tests because setting up a test database felt like more effort than it was worth, that's exactly the friction Keploy removes. You don't maintain mock data by hand, you don't need a live database in CI just to run your test suite, and the tests you get are based on how the API is actually used, not how you imagined someone might use it.
+
+It's not a replacement for thinking carefully about edge cases, but as a way to get real regression coverage out of normal development work, with almost no extra effort, it's a genuinely useful shortcut.
+
+<Callout type="info">
+If you're trying this yourself: start with the simplest sample app you can find. Understanding the concept matters more than getting a complicated demo working on your first try.
+</Callout>
